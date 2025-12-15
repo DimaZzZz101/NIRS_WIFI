@@ -46,18 +46,15 @@ if [ $# -lt 2 ]; then
     exit 1
 fi
 
-# Основные параметры
 INTERFACE="$1"
 TIMEOUT="$2"
 shift 2
 
-# Проверка, что timeout - число
 if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]]; then
     echo "ERROR: Timeout must be a number" >&2
     exit 1
 fi
 
-# Параметры по умолчанию
 CHANNELS=""
 BSSID=""
 BAND=""
@@ -66,324 +63,238 @@ DOCKER_IMAGE="wifi:latest"
 DATA_DIR="wifi_data"
 RECON_DIR="$DATA_DIR/recon"
 
-# Списки валидных каналов для проверки
+# Валидные каналы
 VALID_24GHZ_CHANNELS=(1 2 3 4 5 6 7 8 9 10 11 12 13)
-
-# UNII-1: (36 40 44 48)
-# UNII-2: (52 56 60 64)
-# UNII-2-ext: (132 136 140 144)
-# UNII-3: (149 153 157 161)
-# ISM: (165)
 VALID_5GHZ_CHANNELS=(36 40 44 48 52 56 60 64 132 136 140 144 149 153 157 161 165)
 
-# Функция проверки валидности канала
 validate_channel() {
     local channel="$1"
-    
-    # Проверка, что это число
-    if ! [[ "$channel" =~ ^[0-9]+$ ]]; then
-        return 1
-    fi
-    
-    # Канал 0 - специальный (все каналы)
-    if [ "$channel" -eq 0 ]; then
-        return 0
-    fi
-    
-    # Проверка 2.4 ГГц
-    for valid in "${VALID_24GHZ_CHANNELS[@]}"; do
-        if [ "$channel" -eq "$valid" ]; then
-            return 0
-        fi
-    done
-    
-    # Проверка 5 ГГц
-    for valid in "${VALID_5GHZ_CHANNELS[@]}"; do
-        if [ "$channel" -eq "$valid" ]; then
-            return 0
-        fi
-    done
-    
-    # Если не нашли в валидных каналах
+    if ! [[ "$channel" =~ ^[0-9]+$ ]]; then return 1; fi
+    if [ "$channel" -eq 0 ]; then return 0; fi
+    for v in "${VALID_24GHZ_CHANNELS[@]}"; do [ "$channel" -eq "$v" ] && return 0; done
+    for v in "${VALID_5GHZ_CHANNELS[@]}"; do [ "$channel" -eq "$v" ] && return 0; done
     return 1
 }
 
-# Функция проверки и нормализации каналов
 normalize_channels() {
     local channels="$1"
-    
-    # Если пусто
-    if [ -z "$channels" ]; then
-        echo ""
-        return 0
-    fi
-    
-    # Если указан диапазон через дефис (например, 36-48)
+    if [ -z "$channels" ]; then echo ""; return 0; fi
     if [[ "$channels" =~ ^([0-9]+)-([0-9]+)$ ]]; then
-        local start="${BASH_REMATCH[1]}"
-        local end="${BASH_REMATCH[2]}"
-        
-        # Проверяем оба конца диапазона
-        if ! validate_channel "$start"; then
-            echo "ERROR: Invalid start channel in range: $start" >&2
-            return 1
+        local s="${BASH_REMATCH[1]}" e="${BASH_REMATCH[2]}"
+        if validate_channel "$s" && validate_channel "$e" && [ "$e" -ge "$s" ]; then
+            echo "$channels"; return 0
         fi
-        
-        if ! validate_channel "$end"; then
-            echo "ERROR: Invalid end channel in range: $end" >&2
-            return 1
-        fi
-        
-        # Проверяем, что end >= start
-        if [ "$end" -lt "$start" ]; then
-            echo "ERROR: End channel must be greater than or equal to start channel" >&2
-            return 1
-        fi
-        
-        echo "$channels"
-        return 0
+        echo "ERROR: Invalid channel range" >&2; return 1
     fi
-    
-    # Если указано несколько каналов через запятую
-    IFS=',' read -ra channel_array <<< "$channels"
-    local valid_channels=()
-    
-    for ch in "${channel_array[@]}"; do
+    IFS=',' read -ra arr <<< "$channels"
+    local valid=()
+    for ch in "${arr[@]}"; do
         ch_clean=$(echo "$ch" | tr -d '[:space:]')
-        
-        # Проверяем валидность каждого канала
-        if ! validate_channel "$ch_clean"; then
-            echo "ERROR: Invalid channel: $ch_clean" >&2
-            echo "Valid 2.4 GHz channels: ${VALID_24GHZ_CHANNELS[*]}" >&2
-            echo "Valid 5 GHz channels: ${VALID_5GHZ_CHANNELS[*]}" >&2
-            return 1
-        fi
-        
-        valid_channels+=("$ch_clean")
+        if validate_channel "$ch_clean"; then valid+=("$ch_clean"); else echo "ERROR: Invalid channel $ch_clean" >&2; return 1; fi
     done
-    
-    # Собираем обратно в строку
-    echo $(IFS=','; echo "${valid_channels[*]}")
-    return 0
+    echo "$(IFS=','; echo "${valid[*]}")"
 }
 
-# Функция для проверки существования интерфейса
 check_interface_exists() {
     docker run --rm --net=host --cap-drop=ALL --cap-add=NET_ADMIN --cap-add=NET_RAW \
         $DOCKER_IMAGE ip link show "$1" >/dev/null 2>&1
-    return $?
 }
 
-# Парсинг дополнительных аргументов
 while [[ $# -gt 0 ]]; do
     case $1 in
-        -c)
-            CHANNELS="$2"
-            
-            # Нормализуем и проверяем каналы
-            NORMALIZED_CHANNELS=$(normalize_channels "$CHANNELS")
-            if [ $? -ne 0 ]; then
-                exit 1
-            fi
-            CHANNELS="$NORMALIZED_CHANNELS"
-            
-            shift 2
-            ;;
-        --bssid)
-            BSSID="$2"
-            
-            # Базовая проверка формата MAC-адреса
-            if ! [[ "$BSSID" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
-                echo "WARN: BSSID '$BSSID' may not be a valid MAC address" >&2
-                echo "INFO: Continuing anyway, airodump-ng will validate" >&2
-            fi
-            
-            shift 2
-            ;;
+        -c) CHANNELS=$(normalize_channels "$2") || exit 1; shift 2 ;;
+        --bssid) BSSID="$2"; shift 2 ;;
         --band)
             BAND="$2"
-            
-            # Проверка валидности диапазона и преобразование значений
-            case "$BAND" in
-                2.4|bg)
-                    BAND="bg"
-                    echo "INFO: Scanning 2.4 GHz band (bg)" >&2
-                    ;;
-                5|a)
-                    BAND="a"
-                    echo "INFO: Scanning 5 GHz band (a)" >&2
-                    ;;
-                abg)
-                    echo "INFO: Scanning both 2.4 GHz and 5 GHz bands (abg)" >&2
-                    ;;
-                a|b|g|bg)
-                    # Эти значения уже в правильном формате
-                    echo "INFO: Using band: $BAND" >&2
-                    ;;
-                *)
-                    echo "ERROR: Invalid band '$BAND'" >&2
-                    echo "Valid values: a, b, g, bg, abg, 2.4, 5" >&2
-                    exit 1
-                    ;;
-            esac
-            
+            case "$BAND" in 2.4|bg) BAND="bg" ;; 5|a) BAND="a" ;; abg) ;; a|b|g|bg) ;; *) echo "ERROR: Invalid band" >&2; exit 1 ;; esac
             shift 2
             ;;
-        -w)
-            FILE_PREFIX="$2"
-            # Удаляем небезопасные символы из префикса
-            FILE_PREFIX=$(echo "$FILE_PREFIX" | tr -cd '[:alnum:]_-')
-            shift 2
-            ;;
-        *)
-            echo "ERROR: Unknown option: $1" >&2
-            exit 1
-            ;;
+        -w) FILE_PREFIX=$(echo "$2" | tr -cd '[:alnum:]_-'); shift 2 ;;
+        *) echo "ERROR: Unknown option: $1" >&2; exit 1 ;;
     esac
 done
 
-# Проверка конфликтующих опций: нельзя указывать одновременно -c и --band
 if [ -n "$CHANNELS" ] && [ -n "$BAND" ]; then
-    echo "ERROR: Cannot specify both -c (channels) and --band options simultaneously" >&2
-    echo "Use either -c to specify specific channels or --band to use a frequency band" >&2
+    echo "ERROR: Cannot use both -c and --band" >&2
     exit 1
 fi
 
-# Проверка конфликта BSSID и каналов/band
-if [ -n "$BSSID" ]; then
-    if [ -n "$CHANNELS" ]; then
-        echo "INFO: Scanning specific BSSID on channel(s): $CHANNELS" >&2
-        echo "      Make sure the BSSID operates on these channels." >&2
-    elif [ -n "$BAND" ]; then
-        echo "INFO: Scanning specific BSSID on band: $BAND" >&2
-        echo "      airodump-ng will automatically switch to the correct channel." >&2
-    fi
-fi
-
-# Если не указаны ни каналы, ни диапазон - просто сканируем без указания каналов
-if [ -z "$CHANNELS" ] && [ -z "$BAND" ]; then
-    echo "INFO: No channels or band specified, airodump-ng will scan all channels" >&2
-fi
-
-# Создание директории для хранения данных
 mkdir -p "$RECON_DIR"
 
-# Генерация имени файла на основе timestamp
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 SCAN_DIR="$RECON_DIR/$TIMESTAMP"
-if [ -z "$FILE_PREFIX" ]; then
-    OUTPUT_PREFIX="$SCAN_DIR/recon"
-else
-    OUTPUT_PREFIX="$SCAN_DIR/${FILE_PREFIX}"
-fi
+PREFIX="$( [ -z "$FILE_PREFIX" ] && echo "recon" || echo "$FILE_PREFIX" )"
 mkdir -p "$SCAN_DIR"
 
-# Проверка существования интерфейса
 if ! check_interface_exists "$INTERFACE"; then
-    echo "ERROR: Interface '$INTERFACE' not found or not accessible" >&2
+    echo "ERROR: Interface '$INTERFACE' not found" >&2
     exit 1
 fi
 
-# Формирование команды airodump-ng
-AIRODUMP_CMD="airodump-ng --wps --manufacturer --beacons -w $OUTPUT_PREFIX --output-format csv,cap"
-
-# Добавление опциональных параметров
-# Приоритет: если указаны каналы, используем их, иначе используем band
-if [ -n "$CHANNELS" ]; then
-    AIRODUMP_CMD="$AIRODUMP_CMD -c $CHANNELS"
-elif [ -n "$BAND" ]; then
-    AIRODUMP_CMD="$AIRODUMP_CMD --band $BAND"
-fi
-
-if [ -n "$BSSID" ]; then
-    AIRODUMP_CMD="$AIRODUMP_CMD --bssid $BSSID"
-fi
-
-# Добавление интерфейса команду и дополнительных опций
+AIRODUMP_CMD="airodump-ng --wps --manufacturer --beacons -w /output/$PREFIX --output-format csv,cap"
+[ -n "$CHANNELS" ] && AIRODUMP_CMD="$AIRODUMP_CMD -c $CHANNELS"
+[ -n "$BAND" ] && AIRODUMP_CMD="$AIRODUMP_CMD --band $BAND"
+[ -n "$BSSID" ] && AIRODUMP_CMD="$AIRODUMP_CMD --bssid $BSSID"
 AIRODUMP_CMD="$AIRODUMP_CMD $INTERFACE"
 
-echo "Starting scan for $TIMEOUT seconds with command:" >&2
-echo "  $AIRODUMP_CMD" >&2
+echo "Starting Wi-Fi recon for $TIMEOUT seconds..." >&2
+echo "Directory: $SCAN_DIR" >&2
+echo "airodump-ng command: $AIRODUMP_CMD" >&2
 
-# Запуск airodump-ng в Docker-контейнере с таймаутом
-if ! docker run --rm \
+# 1. airodump-ng — монтируем $SCAN_DIR как /output
+docker run --rm -d \
     --name "airodump-${TIMESTAMP}" \
     --net=host \
-    --cap-add=NET_ADMIN \
-    --cap-add=NET_RAW \
-    --cap-add=SYS_MODULE \
-    --cpus="0.5" \
-    --memory="1g" \
-    -v "$(pwd)/$DATA_DIR/recon:/$DATA_DIR/recon" \
+    --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=SYS_MODULE \
+    --cpus="0.5" --memory="1g" \
+    -v "$(pwd)/$SCAN_DIR:/output" \
     $DOCKER_IMAGE \
-    timeout --signal=INT "${TIMEOUT}s" $AIRODUMP_CMD >/dev/null 2>&1; then
-    
-    # Проверяем, завершился ли airodump-ng нормально (код 124 или 0 для timeout)
-    DOCKER_EXIT_CODE=$?
-    if [ $DOCKER_EXIT_CODE -eq 124 ] || [ $DOCKER_EXIT_CODE -eq 0 ]; then
-        echo "Scan completed successfully" >&2
-    else
-        echo "ERROR: airodump-ng failed with exit code $DOCKER_EXIT_CODE" >&2
-        exit 1
-    fi
-fi
+    timeout --signal=INT ${TIMEOUT}s $AIRODUMP_CMD
 
-# Проверяем, созданы ли выходные файлы
-CSV_FILE="${OUTPUT_PREFIX}-01.csv"
-CAP_FILE="${OUTPUT_PREFIX}-01.cap"
+# Ждём окончания сканирования
+sleep $TIMEOUT
 
-if [ -f "$CSV_FILE" ]; then
-    echo "$CSV_FILE"
+# Останавливаем airodump-ng (на всякий случай)
+docker kill "airodump-${TIMESTAMP}" 2>/dev/null || true
 
-    # Выводим информацию о созданных файлах
-    echo "Created files:" >&2
-    for ext in csv cap; do
-        for file in "${OUTPUT_PREFIX}"-*."$ext"; do
-            if [ -f "$file" ]; then
-                echo "  $(basename "$file")" >&2
-            fi
-        done
-    done
+# Проверяем файлы
+CSV_FILE=$(ls "$SCAN_DIR"/*-01.csv 2>/dev/null | head -1 || true)
+CAP_FILE=$(ls "$SCAN_DIR"/*-01.cap 2>/dev/null | head -1 || true)
 
-    if [ -f "$CAP_FILE" ]; then
-        echo "Launching wash_recon.sh to extract WPS information..." >&2
-
-        # Запускаем wash_recon.sh
-        WPS_JSON=$(./wash_recon.sh -f "$CAP_FILE" -w "${FILE_PREFIX:-recon}")
-
-        if [ -f "$WPS_JSON" ]; then
-            echo "WPS data saved to: $WPS_JSON" >&2
-
-            # Формируем путь к финальному JSON
-            FINAL_JSON="$SCAN_DIR/recon.json"
-
-            echo "Merging data with enrich_recon.py..." >&2
-            if python3 enrich_recon.py "$CSV_FILE" "$WPS_JSON" "$FINAL_JSON"; then
-                echo "Scan completed successfully!" >&2
-                echo "Final enriched JSON: $FINAL_JSON" >&2
-
-                # Удаляем временный WPS-файл после успешного мерджа
-                echo "Cleaning up temporary WPS file: $WPS_JSON" >&2
-                rm -f "$WPS_JSON"
-            else
-                echo "ERROR: Failed to run enrich_recon.py" >&2
-                exit 1
-            fi
-        else
-            echo "WARNING: wash_recon.sh did not create WPS JSON (maybe no WPS networks found)" >&2
-            echo "Continuing without WPS data..." >&2
-
-            # Если WPS-файла нет — создаём recon.json только из CSV
-            FINAL_JSON="$SCAN_DIR/recon.json"
-            python3 enrich_recon.py "$CSV_FILE" "" "$FINAL_JSON" 2>/dev/null || true
-        fi
-    else
-        echo "WARNING: CAP file not found ($CAP_FILE), skipping WPS analysis" >&2
-        FINAL_JSON="$SCAN_DIR/recon.json"
-        python3 enrich_recon.py "$CSV_FILE" "" "$FINAL_JSON" 2>/dev/null || true
-    fi
-
-else
-    echo "ERROR: No output CSV files created" >&2
+if [ -z "$CSV_FILE" ]; then
+    echo "ERROR: No CSV file created — check interface and monitor mode" >&2
+    ls -la "$SCAN_DIR" >&2
     exit 1
 fi
+
+echo "$CSV_FILE"
+
+echo "Created files:" >&2
+ls "$SCAN_DIR"/*.{csv,cap} 2>/dev/null || true
+
+# 2. wash (если есть .cap)
+if [ -n "$CAP_FILE" ]; then
+    echo "Running wash on capture..." >&2
+    docker run --rm \
+        -v "$(pwd)/$SCAN_DIR:/output" \
+        $DOCKER_IMAGE \
+        wash --json -f "/output/$(basename "$CAP_FILE")" > "$SCAN_DIR/wps_temp.json" 2>/dev/null || true
+else
+    touch "$SCAN_DIR/wps_temp.json"  # пустой, если нет .cap
+fi
+
+# 3. enrich_recon (встроенный Python)
+echo "Generating recon.json..." >&2
+python3 - <<PYTHON "$CSV_FILE" "$SCAN_DIR/wps_temp.json" "$SCAN_DIR/recon.json"
+import sys, json, os
+
+csv_path = sys.argv[1]
+wps_path = sys.argv[2] if len(sys.argv) > 2 else ""
+out_path = sys.argv[3]
+
+with open(csv_path, 'r', encoding='utf-8', errors='ignore') as f:
+    lines = [l.rstrip('\n') for l in f if l.strip()]
+
+try:
+    ap_end = next(i for i, l in enumerate(lines) if 'Station MAC' in l)
+except:
+    sys.exit(1)
+
+aps = []
+for line in lines[2:ap_end]:
+    if not line.strip(): continue
+    f = [x.strip() for x in line.split(',')]
+    if len(f) < 14: continue
+    key = f[14] if len(f) > 14 else ''
+    aps.append({
+        'bssid': f[0],
+        'first_seen': f[1],
+        'last_seen': f[2],
+        'channel': f[3],
+        'speed': f[4],
+        'privacy': f[5],
+        'cipher': f[6],
+        'auth': f[7],
+        'power': f[8],
+        'essid': f[13],
+        'key': key
+    })
+
+clients = []
+for line in lines[ap_end + 1:]:
+    if not line.strip(): continue
+    f = [x.strip() for x in line.split(',')]
+    if len(f) < 6: continue
+    probed = ','.join(f[6:]) if len(f) > 6 else ''
+    clients.append({
+        'station_mac': f[0],
+        'power': f[3],
+        'packets': f[4],
+        'probed_essids': probed,
+        'associated_bssid': f[5]
+    })
+
+wash_data = {}
+if wps_path and os.path.exists(wps_path):
+    with open(wps_path, 'r') as f:
+        for line in f:
+            line = line.strip()
+            if not line: continue
+            try:
+                item = json.loads(line)
+                b = item.get('bssid', '').upper()
+                if b:
+                    clean_wps = {
+                        'enabled': True,
+                        'version': "2.0" if item.get('wps_version') == 32 else "1.0" if item.get('wps_version') == 16 else None,
+                        'locked': item.get('wps_locked') == 2,
+                        'locked_status': "Yes" if item.get('wps_locked') == 2 else "No",
+                        'manufacturer': item.get('wps_manufacturer'),
+                        'model_name': item.get('wps_model_name'),
+                        'model_number': item.get('wps_model_number'),
+                        'device_name': item.get('wps_device_name'),
+                        'config_methods': item.get('wps_config_methods'),
+                        'rf_bands': item.get('wps_rf_bands')
+                    }
+                    clean_wps = {k: v for k, v in clean_wps.items() if v is not None}
+                    wash_data[b] = clean_wps
+            except: pass
+
+client_map = {}
+for c in clients:
+    b = c['associated_bssid'].upper()
+    if '(NOT ASSOCIATED)' in c['associated_bssid'].lower(): continue
+    clean_c = {
+        'mac': c['station_mac'],
+        'power': c['power'],
+        'packets': c['packets'],
+        'probed_essids': c['probed_essids'] or None,
+        'associated_ap': c['associated_bssid']
+    }
+    client_map.setdefault(b, []).append(clean_c)
+
+result = []
+for ap in aps:
+    bu = ap['bssid'].upper()
+    result.append({
+        'bssid': ap['bssid'],
+        'essid': ap['essid'] or None,
+        'channel': ap['channel'],
+        'power': ap['power'],
+        'privacy': ap['privacy'] or None,
+        'auth': ap['auth'],
+        'clients': client_map.get(bu, []),
+        'wps': wash_data.get(bu, {'enabled': False, 'version': None, 'locked': False, 'locked_status': "N/A"})
+    })
+
+with open(out_path, 'w', encoding='utf-8') as f:
+    json.dump(result, f, indent=4, ensure_ascii=False)
+
+print(f"Final enriched JSON saved: {out_path}")
+PYTHON
+
+# Удаляем временный wps-файл
+rm -f "$SCAN_DIR/wps_temp.json"
+
+echo "Scan completed successfully!" >&2
+echo "Final enriched JSON: $SCAN_DIR/recon.json" >&2

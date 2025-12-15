@@ -188,7 +188,6 @@ if [ -s "$PCAP_FILE" ]; then
         if [ -f "$CRACKED_FILE" ] && [ -s "$CRACKED_FILE" ]; then
             echo "PASSWORD FOUND!" >&2
             echo "Saved to: $CRACKED_FILE" >&2
-            cat "$CRACKED_FILE" >&2
         else
             echo "No password found in wordlist" >&2
         fi
