@@ -20,8 +20,6 @@
         "locked": false,
         "locked_status": "Yes",
         "manufacturer": "www.openwrt.org",
-        "model_name": " ",
-        "model_number": " ",
         "device_name": "OpenWrt AP",
         "config_methods": "0000"
     }
