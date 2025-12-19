@@ -9,12 +9,33 @@
 
 set -euo pipefail
 
+# Функция для очистки: убивает контейнер, если он запущен
+cleanup() {
+    if [ -n "${CONTAINER_NAME:-}" ]; then
+        echo "Stopping container: $CONTAINER_NAME" >&2
+        docker kill "$CONTAINER_NAME" 2>/dev/null || true
+    fi
+    exit 1
+}
+
+# Ловим сигналы SIGINT и SIGTERM
+trap cleanup SIGINT SIGTERM
+
 if [ $# -ne 1 ]; then
-    echo "Usage: $0 <pcapng_path>" >&2
+    SCRIPT_NAME="$(basename "$0")"
+    cat >&2 << EOF
+Usage: $SCRIPT_NAME <pcapng_path>
+EOF
     exit 1
 fi
 
 PCAPNG_PATH="$1"
+
+# Проверка, что путь не содержит небезопасные элементы
+if [[ "$PCAPNG_PATH" =~ \.\./ ]]; then
+    echo "ERROR: Path contains unsafe elements: $PCAPNG_PATH" >&2
+    exit 1
+fi
 
 DOCKER_IMAGE="wifi:latest"
 DATA_DIR="wifi_data"
@@ -59,7 +80,7 @@ echo "Timestamp: $TIMESTAMP" >&2
 echo "Converting to hc22000 format..." >&2
 docker run --rm \
     -v "$(pwd)/$DATA_DIR:/$DATA_DIR" \
-    $DOCKER_IMAGE \
+    "$DOCKER_IMAGE" \
     hcxpcapngtool -o "/$HASH_FILE" "/$PCAPNG_PATH"
 
 if [ ! -f "$HASH_FILE" ] || [ ! -s "$HASH_FILE" ]; then
@@ -71,7 +92,16 @@ fi
 echo "Extracting ESSID and BSSID from hash..." >&2
 FIRST_LINE=$(head -1 "$HASH_FILE")
 
-IFS='*' read -r _ _ _ MAC_AP MAC_STA ESSID_HEX _ <<< "$FIRST_LINE"
+# Парсинг: MAC_AP MAC_STA ESSID_HEX
+IFS='*' read -ra FIELDS <<< "$FIRST_LINE"
+if [ ${#FIELDS[@]} -lt 6 ]; then
+    echo "ERROR: Could not parse hash line (too few fields)" >&2
+    exit 1
+fi
+
+MAC_AP="${FIELDS[3]}"
+MAC_STA="${FIELDS[4]}"
+ESSID_HEX="${FIELDS[5]}"
 
 if [ -z "$MAC_AP" ] || [ -z "$ESSID_HEX" ]; then
     echo "ERROR: Could not parse hash line" >&2
@@ -86,12 +116,12 @@ PASS_FILE="$PCAPNG_DIR/${TIMESTAMP}_${ESSID}_${BSSID_FORMATTED}_pass.txt"
 echo "Extracted ESSID: $ESSID" >&2
 echo "Extracted BSSID: $BSSID_FORMATTED" >&2
 
-# Взлом
+# Подбор пароля
 echo "Cracking with hashcat -m 22000..." >&2
 docker run --rm \
     -v "$(pwd)/$DATA_DIR:/$DATA_DIR" \
     -v "$(pwd)/wordlists:/wordlists:ro" \
-    $DOCKER_IMAGE \
+    "$DOCKER_IMAGE" \
     hashcat -m 22000 "/$HASH_FILE" /wordlists/wordlist.txt -o "/$PASS_FILE_TEMP" --force
 
 # Переименовываем временный файл

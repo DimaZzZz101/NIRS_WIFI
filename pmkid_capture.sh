@@ -10,15 +10,36 @@
 
 set -euo pipefail
 
+# Функция для очистки: убивает контейнер, если он запущен
+cleanup() {
+    if [ -n "${CONTAINER_NAME:-}" ]; then
+        echo "Stopping container: $CONTAINER_NAME" >&2
+        docker kill "$CONTAINER_NAME" 2>/dev/null || true
+    fi
+    exit 1
+}
+
+# Ловим сигналы SIGINT и SIGTERM
+trap cleanup SIGINT SIGTERM
+
 # Проверка аргументов
 if [ $# -ne 2 ]; then
-    echo "Usage: $0 <interface> <timeout_seconds>" >&2
-    echo "Example: $0 wlan0mon 120" >&2
+    SCRIPT_NAME="$(basename "$0")"
+    cat >&2 << EOF
+Usage: $SCRIPT_NAME <interface> <timeout_seconds>
+
+EOF
     exit 1
 fi
 
 INTERFACE="$1"
 TIMEOUT="$2"
+
+# Проверка имени интерфейса
+if [[ ! "$INTERFACE" =~ ^[a-zA-Z0-9]+([a-zA-Z0-9._-]*[a-zA-Z0-9])?$ ]]; then
+    echo "ERROR: Interface name contains invalid characters" >&2
+    exit 1
+fi
 
 # Проверка, что timeout - число
 if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]]; then
@@ -34,7 +55,7 @@ PMKID_DIR="$DATA_DIR/pmkid"
 # Функция проверки интерфейса
 check_interface_exists() {
     docker run --rm --net=host --cap-drop=ALL --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        $DOCKER_IMAGE ip link show "$1" >/dev/null 2>&1
+        "$DOCKER_IMAGE" ip link show "$1" >/dev/null 2>&1
     return $?
 }
 
@@ -54,15 +75,12 @@ echo "Starting PMKID capture (channel hopping) for $TIMEOUT seconds" >&2
 echo "Interface: $INTERFACE" >&2
 echo "Output:    $OUTPUT_FILE" >&2
 
-# Команда hcxdumptool
-HCX_CMD="hcxdumptool -i $INTERFACE -w /$OUTPUT_FILE"
+# Уникальное имя контейнера
+CONTAINER_NAME="hcxdump-${TIMESTAMP}"
 
-# Оборачиваем в timeout
-HCX_CMD="timeout --signal=INT ${TIMEOUT}s $HCX_CMD"
-
-# Запуск в Docker с подавлением лишнего вывода
-docker run --rm \
-    --name "hcxdump-${TIMESTAMP}" \
+# Запуск hcxdumptool в фоне
+docker run --rm -d \
+    --name "$CONTAINER_NAME" \
     --net=host \
     --cap-add=NET_ADMIN \
     --cap-add=NET_RAW \
@@ -70,8 +88,17 @@ docker run --rm \
     --cpus="1" \
     --memory="512m" \
     -v "$(pwd)/$DATA_DIR/pmkid:/$DATA_DIR/pmkid" \
-    $DOCKER_IMAGE \
-    bash -c "$HCX_CMD" > /dev/null 2> >(grep -v -E "BPF is unset|experimental penetration testing tool|mercilessly|irreparable damage|Not understanding|starting...|exit on sigterm" >&2)
+    "$DOCKER_IMAGE" \
+    timeout --signal=INT ${TIMEOUT}s hcxdumptool -i "$INTERFACE" -w "/$OUTPUT_FILE" --disable_disassociation > /dev/null 2>&1
+
+# Ждём завершения или убиваем
+(
+    sleep "$TIMEOUT"
+    docker kill "$CONTAINER_NAME" 2>/dev/null || true
+) &
+
+# Ждём завершения контейнера
+docker wait "$CONTAINER_NAME" 2>/dev/null || true
 
 # Проверка результата
 if [ -f "$OUTPUT_FILE" ]; then

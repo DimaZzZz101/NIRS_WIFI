@@ -1,17 +1,17 @@
 {
-    "bssid": "1C:8X:XX:XX:X9:70",
-    "essid": "ASUS",
+    "bssid": "96:8X:XX:XX:X7:0F",
+    "essid": "GL-AR750S-70f",
     "channel": "6",
-    "power": "-30",
+    "power": "-46",
     "privacy": "WPA3 WPA2",
     "auth": "SAE CMAC PSK",
     "clients": [
         {
-            "mac": "0C:CX:XX:XX:XC:CF",
-            "power": "-1",
-            "packets": "1",
+            "mac": "56:0X:XX:XX:X3:EF",
+            "power": "-39",
+            "packets": "670",
             "probed_essids": null,
-            "associated_ap": "1C:8X:XX:XX:X9:70"
+            "associated_ap": "96:8X:XX:XX:X7:0F"
         }
     ],
     "wps": {
@@ -19,11 +19,10 @@
         "version": "2.0",
         "locked": false,
         "locked_status": "Yes",
-        "manufacturer": "ASUSTeK Computer Inc.",
-        "model_name": "Wi-Fi Protected Setup Router",
-        "model_number": "RT-N66U",
-        "device_name": "RT-N66U",
-        "config_methods": "2008",
-        "rf_bands": "01"
+        "manufacturer": "www.openwrt.org",
+        "model_name": " ",
+        "model_number": " ",
+        "device_name": "OpenWrt AP",
+        "config_methods": "0000"
     }
 }

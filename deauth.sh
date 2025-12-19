@@ -18,13 +18,29 @@
 
 set -euo pipefail
 
+# Функция для очистки: убивает контейнер, если он запущен
+cleanup() {
+    if [ -n "${CONTAINER_NAME:-}" ]; then
+        echo "Stopping container: $CONTAINER_NAME" >&2
+        docker kill "$CONTAINER_NAME" 2>/dev/null || true
+    fi
+    exit 1
+}
+
+# Ловим сигналы SIGINT и SIGTERM
+trap cleanup SIGINT SIGTERM
+
 # Проверка минимального количества аргументов
 if [ $# -lt 2 ]; then
-    echo "Usage: $0 <interface> <bssid> [options]" >&2
-    echo "Options:" >&2
-    echo "  -c <client_mac>      Client MAC to deauthenticate (broadcast if omitted)" >&2
-    echo "  --deauths <num>      Number of deauth packets (0 for unlimited, default: 0)" >&2
-    echo "  --timeout <seconds>  Timeout for unlimited attack (optional)" >&2
+    SCRIPT_NAME="$(basename "$0")"
+    cat >&2 << EOF
+Usage: $SCRIPT_NAME <interface> <bssid> [options]
+Options:
+  -c <client_mac>      Client MAC to deauthenticate (broadcast if omitted)
+  --deauths <num>      Number of deauth packets (0 for unlimited, default: 0)
+  --timeout <seconds>  Timeout for unlimited attack (optional)
+
+EOF
     exit 1
 fi
 
@@ -32,6 +48,18 @@ fi
 INTERFACE="$1"
 BSSID="$2"
 shift 2
+
+# Проверка имени интерфейса
+if [[ ! "$INTERFACE" =~ ^[a-zA-Z0-9]+([a-zA-Z0-9._-]*[a-zA-Z0-9])?$ ]]; then
+    echo "ERROR: Interface name contains invalid characters" >&2
+    exit 1
+fi
+
+# Проверка MAC-адреса BSSID
+if [[ ! "$BSSID" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
+    echo "ERROR: Invalid BSSID format: $BSSID" >&2
+    exit 1
+fi
 
 # Параметры по умолчанию
 CLIENT_MAC=""
@@ -81,18 +109,15 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
-# Валидация обязательных параметров
-validate_mac "$BSSID"
-
 if [ -n "$TIMEOUT" ] && [ "$DEAUTHS" != "0" ]; then
     echo "WARN: Timeout is only applicable when deauths=0 (unlimited mode). Ignoring timeout." >&2
     TIMEOUT=""
 fi
 
-# Функция для проверки существования интерфейса (аналогично wifi_recon.sh)
+# Функция для проверки существования интерфейса
 check_interface_exists() {
     docker run --rm --net=host --cap-drop=ALL --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        $DOCKER_IMAGE ip link show "$1" >/dev/null 2>&1
+        "$DOCKER_IMAGE" ip link show "$1" >/dev/null 2>&1
     return $?
 }
 
@@ -108,26 +133,29 @@ mkdir -p "$DEAUTH_DIR"
 TIMESTAMP=$(date '+%Y%m%d_%H%M%S')
 LOG_FILE="$DEAUTH_DIR/${TIMESTAMP}-deauth.log"
 
-# Формирование команды aireplay-ng
-AIREPLAY_CMD="aireplay-ng -0 $DEAUTHS -a $BSSID"
+# Формирование команды как массива для безопасности
+AIREPLAY_ARGS=(-0 "$DEAUTHS" -a "$BSSID")
 
 if [ -n "$CLIENT_MAC" ]; then
-    AIREPLAY_CMD="$AIREPLAY_CMD -c $CLIENT_MAC"
+    AIREPLAY_ARGS+=(-c "$CLIENT_MAC")
 fi
 
-AIREPLAY_CMD="$AIREPLAY_CMD $INTERFACE"
+AIREPLAY_ARGS+=("$INTERFACE")
+
+# Оборачиваем в timeout, если нужно
+if [ "$DEAUTHS" = "0" ] && [ -n "$TIMEOUT" ]; then
+    AIREPLAY_CMD=(timeout --signal=INT "${TIMEOUT}s" aireplay-ng "${AIREPLAY_ARGS[@]}")
+else
+    AIREPLAY_CMD=(aireplay-ng "${AIREPLAY_ARGS[@]}")
+fi
 
 echo "Starting deauthentication attack with command:" >&2
-echo "  $AIREPLAY_CMD" >&2
-
-# Если указан timeout и deauths=0, оборачиваем в timeout
-if [ "$DEAUTHS" = "0" ] && [ -n "$TIMEOUT" ]; then
-    AIREPLAY_CMD="timeout --signal=INT ${TIMEOUT}s $AIREPLAY_CMD"
-fi
+echo "  ${AIREPLAY_CMD[*]}" >&2
 
 # Запуск aireplay-ng в Docker-контейнере
+CONTAINER_NAME="aireplay-${TIMESTAMP}"
 docker run --rm \
-    --name "aireplay-${TIMESTAMP}" \
+    --name "$CONTAINER_NAME" \
     --net=host \
     --cap-add=NET_ADMIN \
     --cap-add=NET_RAW \
@@ -135,8 +163,8 @@ docker run --rm \
     --cpus="0.5" \
     --memory="1g" \
     -v "$(pwd)/$DATA_DIR/deauth:/$DATA_DIR/deauth" \
-    $DOCKER_IMAGE \
-    $AIREPLAY_CMD > "$LOG_FILE" 2>&1
+    "$DOCKER_IMAGE" \
+    "${AIREPLAY_CMD[@]}" > "$LOG_FILE" 2>&1
 
 # Проверка завершения
 EXIT_CODE=$?

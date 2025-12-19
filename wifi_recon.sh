@@ -24,25 +24,41 @@
 
 set -euo pipefail
 
+# Функция для очистки: убивает контейнер, если он запущен
+cleanup() {
+    if [ -n "${CONTAINER_NAME:-}" ]; then
+        echo "Stopping container: $CONTAINER_NAME" >&2
+        docker kill "$CONTAINER_NAME" 2>/dev/null || true
+    fi
+    exit 1
+}
+
+# Ловим сигналы SIGINT и SIGTERM
+trap cleanup SIGINT SIGTERM
+
 # Проверка минимального количества аргументов
 if [ $# -lt 2 ]; then
-    echo "Usage: $0 <interface> <timeout_seconds> [options]" >&2
-    echo "Options:" >&2
-    echo "  -c <channels>        Channels to scan (e.g., 1,6,11 or 36-48)" >&2
-    echo "  --bssid <mac>        Filter by BSSID" >&2
-    echo "  --band <band>        Band to scan (a, b, g, bg, abg)" >&2
-    echo "  -w <prefix>          File prefix (optional)" >&2
-    echo "" >&2
-    echo "Band values (airodump-ng documentation):" >&2
-    echo "  a    : 5 GHz" >&2
-    echo "  b    : 2.4 GHz (802.11b)" >&2
-    echo "  g    : 2.4 GHz (802.11g)" >&2
-    echo "  bg   : 2.4 GHz (802.11b+802.11g)" >&2
-    echo "  abg  : Both 2.4 GHz and 5 GHz" >&2
-    echo "" >&2
-    echo "Channel examples:" >&2
-    echo "  2.4 GHz: 1,6,11 or 1-11" >&2
-    echo "  5 GHz: 36,40,44,48,52,56,60,64,132,136,140,144,149,153,157,161,165" >&2
+    SCRIPT_NAME="$(basename "$0")"
+    cat >&2 << EOF
+Usage: $SCRIPT_NAME <interface> <timeout_seconds> [options]
+Options:
+  -c <channels>        Channels to scan (e.g., 1,6,11 or 36-48)
+  --bssid <mac>        Filter by BSSID
+  --band <band>        Band to scan (a, b, g, bg, abg)
+  -w <prefix>          File prefix (optional)
+
+Band values (airodump-ng documentation):
+  a    : 5 GHz
+  b    : 2.4 GHz (802.11b)
+  g    : 2.4 GHz (802.11g)
+  bg   : 2.4 GHz (802.11b+802.11g)
+  abg  : Both 2.4 GHz and 5 GHz
+
+Channel examples:
+  2.4 GHz: 1,6,11 or 1-11
+  5 GHz: 36,40,44,48,52,56,60,64,132,136,140,144,149,153,157,161,165
+
+EOF
     exit 1
 fi
 
@@ -52,6 +68,12 @@ shift 2
 
 if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]]; then
     echo "ERROR: Timeout must be a number" >&2
+    exit 1
+fi
+
+# Проверка имени интерфейса
+if [[ ! "$INTERFACE" =~ ^[a-zA-Z0-9]+([a-zA-Z0-9._-]*[a-zA-Z0-9])?$ ]]; then
+    echo "ERROR: Interface name contains invalid characters" >&2
     exit 1
 fi
 
@@ -97,20 +119,44 @@ normalize_channels() {
 
 check_interface_exists() {
     docker run --rm --net=host --cap-drop=ALL --cap-add=NET_ADMIN --cap-add=NET_RAW \
-        $DOCKER_IMAGE ip link show "$1" >/dev/null 2>&1
+        "$DOCKER_IMAGE" ip link show "$1" >/dev/null 2>&1
 }
 
 while [[ $# -gt 0 ]]; do
     case $1 in
-        -c) CHANNELS=$(normalize_channels "$2") || exit 1; shift 2 ;;
-        --bssid) BSSID="$2"; shift 2 ;;
-        --band)
-            BAND="$2"
-            case "$BAND" in 2.4|bg) BAND="bg" ;; 5|a) BAND="a" ;; abg) ;; a|b|g|bg) ;; *) echo "ERROR: Invalid band" >&2; exit 1 ;; esac
+        -c)
+            CHANNELS=$(normalize_channels "$2") || exit 1
             shift 2
             ;;
-        -w) FILE_PREFIX=$(echo "$2" | tr -cd '[:alnum:]_-'); shift 2 ;;
-        *) echo "ERROR: Unknown option: $1" >&2; exit 1 ;;
+        --bssid)
+            BSSID="$2"
+            if [[ ! "$BSSID" =~ ^([0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$ ]]; then
+                echo "ERROR: Invalid BSSID format" >&2
+                exit 1
+            fi
+            shift 2
+            ;;
+        --band)
+            BAND="$2"
+            case "$BAND" in
+                2.4) BAND="bg" ;;
+                5) BAND="a" ;;
+                a|b|g|bg|abg) ;;
+                *)
+                    echo "ERROR: Invalid band: $BAND" >&2
+                    exit 1
+                    ;;
+            esac
+            shift 2
+            ;;
+        -w)
+            FILE_PREFIX=$(echo "$2" | tr -cd '[:alnum:]_-')
+            shift 2
+            ;;
+        *)
+            echo "ERROR: Unknown option: $1" >&2
+            exit 1
+            ;;
     esac
 done
 
@@ -141,21 +187,25 @@ echo "Starting Wi-Fi recon for $TIMEOUT seconds..." >&2
 echo "Directory: $SCAN_DIR" >&2
 echo "airodump-ng command: $AIRODUMP_CMD" >&2
 
-# 1. airodump-ng — монтируем $SCAN_DIR как /output
+# Запуск airodump-ng
+CONTAINER_NAME="airodump-${TIMESTAMP}"
 docker run --rm -d \
-    --name "airodump-${TIMESTAMP}" \
+    --name "$CONTAINER_NAME" \
     --net=host \
     --cap-add=NET_ADMIN --cap-add=NET_RAW --cap-add=SYS_MODULE \
     --cpus="0.5" --memory="1g" \
     -v "$(pwd)/$SCAN_DIR:/output" \
-    $DOCKER_IMAGE \
+    "$DOCKER_IMAGE" \
     timeout --signal=INT ${TIMEOUT}s $AIRODUMP_CMD
 
-# Ждём окончания сканирования
-sleep $TIMEOUT
+# Ждём завершения или убиваем
+(
+    sleep "$TIMEOUT"
+    docker kill "$CONTAINER_NAME" 2>/dev/null || true
+) &
 
-# Останавливаем airodump-ng (на всякий случай)
-docker kill "airodump-${TIMESTAMP}" 2>/dev/null || true
+# Ждём завершения контейнера
+docker wait "$CONTAINER_NAME" 2>/dev/null || true
 
 # Проверяем файлы
 CSV_FILE=$(ls "$SCAN_DIR"/*-01.csv 2>/dev/null | head -1 || true)
@@ -177,7 +227,7 @@ if [ -n "$CAP_FILE" ]; then
     echo "Running wash on capture..." >&2
     docker run --rm \
         -v "$(pwd)/$SCAN_DIR:/output" \
-        $DOCKER_IMAGE \
+        "$DOCKER_IMAGE" \
         wash --json -f "/output/$(basename "$CAP_FILE")" > "$SCAN_DIR/wps_temp.json" 2>/dev/null || true
 else
     touch "$SCAN_DIR/wps_temp.json"  # пустой, если нет .cap
@@ -197,14 +247,17 @@ with open(csv_path, 'r', encoding='utf-8', errors='ignore') as f:
 
 try:
     ap_end = next(i for i, l in enumerate(lines) if 'Station MAC' in l)
-except:
+except StopIteration:
     sys.exit(1)
 
 aps = []
 for line in lines[2:ap_end]:
-    if not line.strip(): continue
+    if not line.strip():
+        continue
     f = [x.strip() for x in line.split(',')]
-    if len(f) < 14: continue
+    if len(f) < 14:
+        continue
+    essid = f[13] if len(f) > 13 else ''
     key = f[14] if len(f) > 14 else ''
     aps.append({
         'bssid': f[0],
@@ -216,15 +269,17 @@ for line in lines[2:ap_end]:
         'cipher': f[6],
         'auth': f[7],
         'power': f[8],
-        'essid': f[13],
+        'essid': essid or None,
         'key': key
     })
 
 clients = []
 for line in lines[ap_end + 1:]:
-    if not line.strip(): continue
+    if not line.strip():
+        continue
     f = [x.strip() for x in line.split(',')]
-    if len(f) < 6: continue
+    if len(f) < 6:
+        continue
     probed = ','.join(f[6:]) if len(f) > 6 else ''
     clients.append({
         'station_mac': f[0],
@@ -239,7 +294,8 @@ if wps_path and os.path.exists(wps_path):
     with open(wps_path, 'r') as f:
         for line in f:
             line = line.strip()
-            if not line: continue
+            if not line:
+                continue
             try:
                 item = json.loads(line)
                 b = item.get('bssid', '').upper()
@@ -258,12 +314,14 @@ if wps_path and os.path.exists(wps_path):
                     }
                     clean_wps = {k: v for k, v in clean_wps.items() if v is not None}
                     wash_data[b] = clean_wps
-            except: pass
+            except:
+                pass
 
 client_map = {}
 for c in clients:
     b = c['associated_bssid'].upper()
-    if '(NOT ASSOCIATED)' in c['associated_bssid'].lower(): continue
+    if '(NOT ASSOCIATED)' in c['associated_bssid'].lower():
+        continue
     clean_c = {
         'mac': c['station_mac'],
         'power': c['power'],
@@ -278,10 +336,10 @@ for ap in aps:
     bu = ap['bssid'].upper()
     result.append({
         'bssid': ap['bssid'],
-        'essid': ap['essid'] or None,
+        'essid': ap['essid'],
         'channel': ap['channel'],
         'power': ap['power'],
-        'privacy': ap['privacy'] or None,
+        'privacy': ap['privacy'],
         'auth': ap['auth'],
         'clients': client_map.get(bu, []),
         'wps': wash_data.get(bu, {'enabled': False, 'version': None, 'locked': False, 'locked_status': "N/A"})
@@ -297,4 +355,3 @@ PYTHON
 rm -f "$SCAN_DIR/wps_temp.json"
 
 echo "Scan completed successfully!" >&2
-echo "Final enriched JSON: $SCAN_DIR/recon.json" >&2
