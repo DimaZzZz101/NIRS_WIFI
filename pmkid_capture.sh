@@ -89,7 +89,7 @@ docker run --rm -d \
     --memory="512m" \
     -v "$(pwd)/$DATA_DIR/pmkid:/$DATA_DIR/pmkid" \
     "$DOCKER_IMAGE" \
-    timeout --signal=INT ${TIMEOUT}s hcxdumptool -i "$INTERFACE" -w "/$OUTPUT_FILE" --disable_disassociation > /dev/null 2>&1
+    timeout --signal=INT ${TIMEOUT}s hcxdumptool -i "$INTERFACE" -w "/$OUTPUT_FILE" --disable_disassociation --filterlist=filter.txt --filtermode=2 > /dev/null 2>&1
 
 # Ждём завершения или убиваем
 (
